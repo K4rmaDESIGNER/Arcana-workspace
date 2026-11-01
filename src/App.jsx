@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from './supabase';
 import { 
   Sparkles, Check, Search, Trash2, BookOpen, 
-  CheckSquare, X, LogOut, LayoutDashboard, Shuffle, Eye, ArrowRight, Users, Plus, AlertCircle, Clock
+  CheckSquare, X, LogOut, LayoutDashboard, Shuffle, Eye, ArrowRight, Users, Plus, AlertCircle, Clock, Lock, User, Menu
 } from 'lucide-react';
 
 const TAROT_CARDS = [
@@ -31,8 +31,11 @@ const TAROT_CARDS = [
 ];
 
 export default function ArcanaWorkspace() {
-  const [stage, setStage] = useState('name_entry'); 
-  const [username, setUsername] = useState('Serafim');
+  const [stage, setStage] = useState('auth'); 
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+
   const [deck, setDeck] = useState(TAROT_CARDS);
   const [selectedCard, setSelectedCard] = useState(null);
   const [genderChoice, setGenderChoice] = useState('mas');
@@ -43,10 +46,12 @@ export default function ArcanaWorkspace() {
 
   const [teamMembers, setTeamMembers] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [notes, setNotes] = useState([]);
 
   const [viewingMember, setViewingMember] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState('');
@@ -54,20 +59,43 @@ export default function ArcanaWorkspace() {
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [selectedAssignedCards, setSelectedAssignedCards] = useState([]);
 
-  const [notes, setNotes] = useState([
-    { id: 1, title: 'Diretrizes de Layout', content: 'Design Dark Neon com efeitos de câmera e zoom 3D.', tag: 'Design' },
-    { id: 2, title: 'Logística de Entregas', content: 'Verificar envios pendentes com o parceiro comercial.', tag: 'Equipe' }
-  ]);
+  const [isNoteModalOpen, setIsNoteModalOpen] = useState(false);
+  const [newNoteTitle, setNewNoteTitle] = useState('');
+  const [newNoteContent, setNewNoteContent] = useState('');
+  const [newNoteTag, setNewNoteTag] = useState('Geral');
 
   useEffect(() => {
+    const savedUser = localStorage.getItem('arcana_session');
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser);
+        if (parsed && parsed.name) {
+          verifyAndRestoreSession(parsed.name, parsed.password);
+        }
+      } catch (e) {
+        localStorage.removeItem('arcana_session');
+      }
+    } else {
+      const lastCreds = localStorage.getItem('arcana_last_creds');
+      if (lastCreds) {
+        try {
+          const parsedCreds = JSON.parse(lastCreds);
+          setUsername(parsedCreds.username || '');
+          setPassword(parsedCreds.password || '');
+        } catch (e) {}
+      }
+    }
+
     fetchTeamMembers();
     fetchTasks();
+    fetchNotes();
 
     const channel = supabase
       .channel('schema-db-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => fetchTeamMembers())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => fetchTasks())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_assignments' }, () => fetchTasks())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notes' }, () => fetchNotes())
       .subscribe();
 
     return () => {
@@ -75,12 +103,35 @@ export default function ArcanaWorkspace() {
     };
   }, []);
 
+  const verifyAndRestoreSession = async (savedName, savedPass) => {
+    const { data: existingUser } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('name', savedName)
+      .maybeSingle();
+
+    if (existingUser && existingUser.password === savedPass) {
+      const assignedCard = TAROT_CARDS.find(c => c.id === existingUser.card_id);
+      setUserProfile({
+        name: existingUser.name,
+        title: existingUser.title || 'Membro Ativo',
+        card: assignedCard
+      });
+
+      if (!assignedCard) {
+        setStage('card_selection');
+      } else {
+        setStage('workspace');
+      }
+    }
+  };
+
   const fetchTeamMembers = async () => {
     const { data, error } = await supabase.from('profiles').select('*');
     if (!error && data) {
       setTeamMembers(data.map(m => ({
         name: m.name,
-        title: m.title,
+        title: m.title || 'Iniciado',
         cardId: m.card_id,
         role: m.role
       })));
@@ -111,6 +162,69 @@ export default function ArcanaWorkspace() {
     }
   };
 
+  const fetchNotes = async () => {
+    const { data, error } = await supabase.from('notes').select('*').order('created_at', { ascending: false });
+    if (!error && data) {
+      setNotes(data);
+    }
+  };
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+
+    if (!username.trim() || !password.trim()) {
+      setAuthError('Preencha o nick e a senha.');
+      return;
+    }
+
+    const cleanUsername = username.trim();
+
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('name', cleanUsername)
+      .maybeSingle();
+
+    if (fetchError) {
+      setAuthError('Erro de conexão com o banco de dados.');
+      return;
+    }
+
+    if (!existingUser) {
+      setAuthError('Utilizador não cadastrado no sistema.');
+      return;
+    }
+
+    if (existingUser.password !== password) {
+      setAuthError('Senha incorreta para este nick.');
+      return;
+    }
+
+    localStorage.setItem('arcana_last_creds', JSON.stringify({ username: cleanUsername, password }));
+    localStorage.setItem('arcana_session', JSON.stringify({ name: cleanUsername, password }));
+
+    const assignedCard = TAROT_CARDS.find(c => c.id === existingUser.card_id);
+    setUserProfile({
+      name: existingUser.name,
+      title: existingUser.title || 'Membro Ativo',
+      card: assignedCard
+    });
+
+    if (!assignedCard) {
+      setStage('card_selection');
+    } else {
+      setStage('workspace');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('arcana_session');
+    setUserProfile(null);
+    setStage('auth');
+    setIsSidebarOpen(false);
+  };
+
   const handleShuffle = () => {
     setIsShuffling(true);
     setIsFaceDown(true);
@@ -124,7 +238,9 @@ export default function ArcanaWorkspace() {
     setIsShuffling(true);
     setIsFaceDown(true);
     setTimeout(() => {
-      const randomCard = deck[Math.floor(Math.random() * deck.length)];
+      const availableCards = deck.filter(c => !teamMembers.some(m => m.cardId === c.id));
+      if (availableCards.length === 0) return;
+      const randomCard = availableCards[Math.floor(Math.random() * availableCards.length)];
       setSelectedCard(randomCard);
       setGenderChoice('mas');
       setIsShuffling(false);
@@ -132,30 +248,37 @@ export default function ArcanaWorkspace() {
   };
 
   const handleCardClick = (card) => {
+    const isTaken = teamMembers.some(m => m.cardId === card.id && m.name !== userProfile?.name);
+    if (isTaken) return;
+
     setSelectedCard(card);
     setGenderChoice('mas');
   };
 
   const handleFinalConfirm = async () => {
-    if (!selectedCard) return;
+    if (!selectedCard || !userProfile) return;
 
     const titleFormatted = genderChoice === 'mas' ? selectedCard.mas : selectedCard.fem;
-    const newProfile = {
-      name: username || 'Membro Arcana',
-      title: titleFormatted,
-      card_id: selectedCard.id,
-      role: 'Membro Ativo'
-    };
 
-    await supabase.from('profiles').upsert([newProfile], { onConflict: 'card_id' });
+    const { error } = await supabase.from('profiles')
+      .update({ 
+        title: titleFormatted, 
+        card_id: selectedCard.id 
+      })
+      .eq('name', userProfile.name);
 
-    setUserProfile({
-      name: newProfile.name,
-      title: newProfile.title,
-      card: selectedCard
-    });
+    if (!error) {
+      setUserProfile({
+        ...userProfile,
+        title: titleFormatted,
+        card: selectedCard
+      });
 
-    setStage('workspace');
+      await fetchTeamMembers();
+      setStage('workspace');
+    } else {
+      console.error('Erro ao fixar carta:', error);
+    }
   };
 
   const getTaskStatus = (task) => {
@@ -213,8 +336,31 @@ export default function ArcanaWorkspace() {
     }
   };
 
-  // --- 1. TELA DE ENTRADA DO NOME ---
-  if (stage === 'name_entry') {
+  const handleCreateNote = async () => {
+    if (!newNoteTitle.trim()) return;
+
+    const { error } = await supabase.from('notes').insert([{
+      title: newNoteTitle,
+      content: newNoteContent,
+      tag: newNoteTag,
+      author: userProfile?.name
+    }]);
+
+    if (!error) {
+      setNewNoteTitle('');
+      setNewNoteContent('');
+      setNewNoteTag('Geral');
+      setIsNoteModalOpen(false);
+      fetchNotes();
+    }
+  };
+
+  const handleDeleteNote = async (noteId) => {
+    await supabase.from('notes').delete().eq('id', noteId);
+    fetchNotes();
+  };
+
+  if (stage === 'auth') {
     return (
       <div className="min-h-screen bg-[#07090e] text-white flex items-center justify-center p-6 select-none relative overflow-hidden">
         <div className="bg-[#121624] border border-cyan-500/40 rounded-3xl p-8 max-w-md w-full shadow-[0_0_80px_rgba(6,182,212,0.3)] flex flex-col items-center text-center relative">
@@ -222,38 +368,60 @@ export default function ArcanaWorkspace() {
             <Sparkles className="w-7 h-7 text-white" />
           </div>
 
-          <h1 className="text-2xl font-extrabold tracking-widest bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-2">
+          <h1 className="text-2xl font-extrabold tracking-widest bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-1">
             ARCANA WORKSPACE
           </h1>
-          <p className="text-xs text-gray-400 mb-6">Identifique-se para iniciar a jornada dos arcanos.</p>
+          <p className="text-xs text-gray-400 mb-6">Acesse com seu Nick e Senha.</p>
 
-          <div className="w-full space-y-4 text-left">
-            <label className="block text-[11px] font-semibold uppercase text-gray-400">Seu Nome ou Codinome:</label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Digite seu nome..."
-              className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-4 py-3 text-sm font-semibold text-cyan-400 focus:outline-none focus:border-cyan-400 transition"
-            />
-          </div>
+          {authError && (
+            <div className="w-full bg-red-500/10 border border-red-500/40 text-red-400 p-3 rounded-xl text-xs mb-4 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{authError}</span>
+            </div>
+          )}
 
-          <button
-            onClick={() => {
-              if (!username.trim()) return;
-              setStage('card_selection');
-            }}
-            className="w-full mt-6 py-3.5 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white shadow-lg shadow-cyan-500/25 hover:scale-[1.01] transition flex items-center justify-center gap-2 text-sm"
-          >
-            Avançar para o Baralho
-            <ArrowRight className="w-4 h-4" />
-          </button>
+          <form onSubmit={handleAuthSubmit} className="w-full space-y-4 text-left">
+            <div>
+              <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Seu Nick (Cadastrado)</label>
+              <div className="relative">
+                <User className="w-4 h-4 text-gray-400 absolute left-3.5 top-3.5" />
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Ex: mrdiscordia..."
+                  className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-xs font-semibold text-cyan-400 focus:outline-none focus:border-cyan-400 transition"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Senha de Acesso</label>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-3.5" />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Sua senha..."
+                  className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl pl-10 pr-4 py-3 text-xs font-semibold text-cyan-400 focus:outline-none focus:border-cyan-400 transition"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full mt-4 py-3.5 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white shadow-lg shadow-cyan-500/25 hover:scale-[1.01] transition flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
+            >
+              Entrar no Workspace
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </form>
         </div>
       </div>
     );
   }
 
-  // --- 2. TELA DE SELEÇÃO DE CARTAS (PROPORÇÃO EQUILIBRADA PARA 100% ZOOM) ---
   if (stage === 'card_selection') {
     return (
       <div className="min-h-screen bg-[#07090e] text-white flex flex-col justify-between p-4 sm:p-6 select-none relative overflow-x-hidden">
@@ -300,7 +468,7 @@ export default function ArcanaWorkspace() {
               <h1 className="text-lg font-extrabold tracking-widest bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
                 ARCANA WORKSPACE
               </h1>
-              <p className="text-[11px] text-gray-400">Olá, <span className="text-cyan-400 font-semibold">{username}</span>. Selecione seu Arcano.</p>
+              <p className="text-[11px] text-gray-400">Nick: <span className="text-cyan-400 font-semibold">{userProfile?.name}</span>. Escolha seu Arcano Fixo.</p>
             </div>
           </div>
 
@@ -314,24 +482,29 @@ export default function ArcanaWorkspace() {
             <button onClick={handleRandomPick} className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 text-xs font-bold shadow-md hover:scale-105 transition">
               Sorteio Aleatório
             </button>
-            <button onClick={() => setStage('name_entry')} className="px-2.5 py-1.5 rounded-xl bg-[#121624] border border-gray-800 text-xs text-gray-400 hover:text-white transition">
-              Voltar
+            <button onClick={handleLogout} className="px-2.5 py-1.5 rounded-xl bg-[#121624] border border-gray-800 text-xs text-gray-400 hover:text-white transition">
+              Sair
             </button>
           </div>
         </header>
 
-        {/* Grid de cartas com tamanho equilibrado para caber perfeitamente na tela sem zoom manual */}
         <main className="max-w-7xl mx-auto w-full flex-1 flex items-center justify-center py-1 relative">
           <div onClick={() => setSelectedCard(null)} className={`fixed inset-0 bg-black/85 backdrop-blur-md z-30 transition-opacity duration-300 ${selectedCard ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} />
 
           <div className={`grid grid-cols-4 sm:grid-cols-6 md:grid-cols-7 lg:grid-cols-8 gap-2.5 w-full max-w-6xl transition-opacity duration-500 ${selectedCard ? 'opacity-20' : 'opacity-100'}`}>
             {deck.map((card, index) => {
               const owner = teamMembers.find(m => m.cardId === card.id);
+              const isTaken = owner && owner.name !== userProfile?.name;
+
               return (
                 <div
                   key={card.id}
                   onClick={() => handleCardClick(card)}
-                  className="perspective-container relative rounded-lg p-1 border border-gray-800/60 bg-[#0f121d]/80 opacity-60 filter brightness-75 hover:opacity-100 hover:brightness-100 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.4)] hover:scale-105 cursor-pointer transition-all duration-300 flex flex-col items-center justify-between"
+                  className={`perspective-container relative rounded-lg p-1 border transition-all flex flex-col items-center justify-between ${
+                    isTaken 
+                      ? 'bg-[#0f121d] border-red-500/30 opacity-30 grayscale cursor-not-allowed' 
+                      : 'bg-[#0f121d]/80 border-gray-800/60 opacity-60 filter brightness-75 hover:opacity-100 hover:brightness-100 hover:border-cyan-400 hover:shadow-[0_0_15px_rgba(6,182,212,0.4)] hover:scale-105 cursor-pointer'
+                  }`}
                   style={{ transform: isShuffling ? `translate(${(index % 2 === 0 ? 1 : -1) * 10}px, ${(index % 3 === 0 ? 1 : -1) * 10}px)` : 'none' }}
                 >
                   <div className="w-full aspect-[675/1015] rounded overflow-hidden relative">
@@ -359,7 +532,6 @@ export default function ArcanaWorkspace() {
           </div>
         </main>
 
-        {/* Modal de seleção com dimensões proporcionais e confortáveis */}
         {selectedCard && (
           <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-3 pointer-events-none overflow-y-auto">
             <div className="pointer-events-auto w-[150px] sm:w-[190px] md:w-[210px] aspect-[675/1015] rounded-xl border-2 border-cyan-400 overflow-hidden shadow-[0_0_60px_rgba(6,182,212,0.8)] bg-[#0a0d14] mb-3 animate-slow-coin relative flex-shrink-0">
@@ -373,12 +545,12 @@ export default function ArcanaWorkspace() {
               <p className="text-[11px] text-gray-400 mt-1 mb-3 leading-relaxed px-1">{selectedCard.desc}</p>
 
               <div className="w-full space-y-2.5">
-                <label className="block text-[9px] font-semibold uppercase text-gray-400">Escolha o Tratamento da Carta:</label>
+                <label className="block text-[9px] font-semibold uppercase text-gray-400">Tratamento Fixo da Carta:</label>
                 <div className="grid grid-cols-2 gap-2">
                   <button onClick={() => setGenderChoice('mas')} className={`py-1.5 rounded-lg text-xs font-bold border transition ${genderChoice === 'mas' ? 'bg-gradient-to-r from-cyan-500 to-blue-600 border-cyan-400 text-white shadow-md' : 'bg-[#1a1f33] border-gray-700 text-gray-300 hover:border-gray-500'}`}>{selectedCard.mas}</button>
                   <button onClick={() => setGenderChoice('fem')} className={`py-1.5 rounded-lg text-xs font-bold border transition ${genderChoice === 'fem' ? 'bg-gradient-to-r from-purple-500 to-pink-600 border-purple-400 text-white shadow-md' : 'bg-[#1a1f33] border-gray-700 text-gray-300 hover:border-gray-500'}`}>{selectedCard.fem}</button>
                 </div>
-                <button onClick={handleFinalConfirm} className="w-full mt-1 py-2 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white shadow-lg shadow-cyan-500/25 hover:scale-[1.01] transition text-xs">Confirmar & Ingressar no Workspace</button>
+                <button onClick={handleFinalConfirm} className="w-full mt-1 py-2 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white shadow-lg shadow-cyan-500/25 hover:scale-[1.01] transition text-xs">Fixar Arcano & Entrar</button>
               </div>
             </div>
           </div>
@@ -387,19 +559,46 @@ export default function ArcanaWorkspace() {
     );
   }
 
-  // --- 3. WORKSPACE PRINCIPAL ---
+  // --- 3. WORKSPACE PRINCIPAL (LAYOUT E NAVEGAÇÃO CORRIGIDOS PARA MOBILE E DESKTOP) ---
   return (
-    <div className="min-h-screen bg-[#0a0d14] text-white flex">
-      <aside className="w-64 bg-[#121624] border-r border-gray-800/80 p-5 flex flex-col justify-between">
+    <div className="min-h-screen bg-[#0a0d14] text-white flex flex-col md:flex-row relative w-full overflow-x-hidden">
+      {/* Cabeçalho Fixo Mobile */}
+      <div className="md:hidden flex items-center justify-between bg-[#121624] border-b border-gray-800 px-4 py-3 z-30 sticky top-0 w-full">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 bg-gradient-to-tr from-cyan-500 to-purple-600 rounded-lg flex items-center justify-center">
+            <Sparkles className="w-4 h-4 text-white" />
+          </div>
+          <span className="font-extrabold text-sm tracking-wider bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">ARCANA</span>
+        </div>
+        <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-cyan-400 hover:bg-gray-800/60 rounded-xl transition">
+          {isSidebarOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+        </button>
+      </div>
+
+      {/* Máscara de Fundo Escuro no Mobile */}
+      {isSidebarOpen && (
+        <div 
+          onClick={() => setIsSidebarOpen(false)} 
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-40 md:hidden" 
+        />
+      )}
+
+      {/* Menu Lateral (Sidebar) */}
+      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#121624] border-r border-gray-800/80 p-5 flex flex-col justify-between transition-transform duration-300 ease-in-out md:translate-x-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div>
-          <div className="flex items-center gap-3 mb-8 px-2">
-            <div className="w-10 h-10 bg-gradient-to-tr from-cyan-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-cyan-500/20">
-              <Sparkles className="w-5 h-5 text-white" />
+          <div className="flex items-center justify-between mb-8 px-2">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-tr from-cyan-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                <Sparkles className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h1 className="font-extrabold text-lg tracking-wider bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">ARCANA</h1>
+                <span className="text-[10px] text-gray-500 font-mono tracking-widest block">WORKSPACE</span>
+              </div>
             </div>
-            <div>
-              <h1 className="font-extrabold text-lg tracking-wider bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">ARCANA</h1>
-              <span className="text-[10px] text-gray-500 font-mono tracking-widest block">WORKSPACE</span>
-            </div>
+            <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-gray-400 hover:text-white p-1">
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
           <nav className="space-y-1">
@@ -414,7 +613,10 @@ export default function ArcanaWorkspace() {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setActiveTab(item.id)}
+                  onClick={() => { 
+                    setActiveTab(item.id); 
+                    setIsSidebarOpen(false); 
+                  }}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition ${isActive ? 'bg-gradient-to-r from-cyan-500/10 to-purple-500/10 text-cyan-400 border border-cyan-500/20 shadow-[0_0_15px_rgba(6,182,212,0.1)]' : 'text-gray-400 hover:bg-gray-800/40 hover:text-white'}`}
                 >
                   <Icon className="w-5 h-5" /> {item.label}
@@ -432,44 +634,45 @@ export default function ArcanaWorkspace() {
             <h4 className="text-sm font-bold truncate text-white">{userProfile?.name}</h4>
             <p className="text-xs text-cyan-400 truncate">{userProfile?.title}</p>
           </div>
-          <button onClick={() => { setSelectedCard(null); setStage('card_selection'); }} className="text-gray-500 hover:text-red-400 p-1 transition" title="Trocar Arcano">
+          <button onClick={handleLogout} className="text-gray-500 hover:text-red-400 p-1 transition" title="Sair da Conta">
             <LogOut className="w-4 h-4" />
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 p-8 overflow-y-auto">
-        <header className="flex justify-between items-center mb-8">
+      {/* Área de Conteúdo Principal */}
+      <main className="flex-1 md:ml-64 p-4 sm:p-8 min-h-screen w-full overflow-y-auto">
+        <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
           <div>
-            <h2 className="text-2xl font-extrabold capitalize text-white">
+            <h2 className="text-xl sm:text-2xl font-extrabold capitalize text-white">
               {activeTab === 'dashboard' && 'Visão Geral'}
               {activeTab === 'team' && 'Equipe & Arcanos'}
               {activeTab === 'tasks' && 'Gestão de Atividades'}
               {activeTab === 'notes' && 'Caderno de Anotações'}
             </h2>
-            <p className="text-xs text-gray-400 mt-1">Sessão ativa para <span className="text-cyan-400 font-semibold">{userProfile?.title}</span></p>
+            <p className="text-xs text-gray-400 mt-1">Conectado como <span className="text-cyan-400 font-semibold">{userProfile?.name}</span> ({userProfile?.title})</p>
           </div>
 
-          <div className="relative">
+          <div className="relative w-full sm:w-auto">
             <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
-            <input type="text" placeholder="Pesquisar..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-[#121624] border border-gray-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition w-64" />
+            <input type="text" placeholder="Pesquisar..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-[#121624] border border-gray-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-cyan-400 transition w-full sm:w-64" />
           </div>
         </header>
 
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
-            <div className="bg-gradient-to-r from-[#121624] via-[#1a1f38] to-[#121624] border border-cyan-500/20 rounded-3xl p-6 relative overflow-hidden flex items-center justify-between">
-              <div className="max-w-md">
-                <span className="text-xs font-mono text-cyan-400 uppercase tracking-widest">ARCANO ATIVO</span>
-                <h3 className="text-2xl font-bold mt-1 text-white">{userProfile?.title}</h3>
-                <p className="text-sm text-gray-400 mt-2">{userProfile?.card?.desc}</p>
+            <div className="bg-gradient-to-r from-[#121624] via-[#1a1f38] to-[#121624] border border-cyan-500/20 rounded-3xl p-6 relative overflow-hidden flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="max-w-md text-center sm:text-left">
+                <span className="text-xs font-mono text-cyan-400 uppercase tracking-widest">ARCANO FIXO ATIVO</span>
+                <h3 className="text-xl sm:text-2xl font-bold mt-1 text-white">{userProfile?.title}</h3>
+                <p className="text-xs sm:text-sm text-gray-400 mt-2">{userProfile?.card?.desc}</p>
               </div>
               <div className="w-24 aspect-[675/1015] rounded-xl border border-cyan-500/40 bg-[#0a0d14] overflow-hidden flex flex-col items-center justify-center shadow-lg shadow-cyan-500/10 flex-shrink-0">
                 <img src={userProfile?.card?.img} alt="" className="w-full h-full object-cover rounded-lg" onError={(e) => { e.target.style.display = 'none'; }} />
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
               <div className="bg-[#121624] border border-gray-800 rounded-2xl p-5">
                 <div className="flex justify-between items-center mb-3"><span className="text-xs text-gray-400 font-medium">Atividades Totais</span><CheckSquare className="w-4 h-4 text-cyan-400" /></div>
                 <h4 className="text-2xl font-bold">{tasks.length}</h4>
@@ -490,7 +693,7 @@ export default function ArcanaWorkspace() {
           <div className="space-y-6">
             <div className="bg-[#121624] border border-gray-800 rounded-2xl p-5">
               <h3 className="text-sm font-bold text-white mb-1">Mural de Arcanos da Equipe</h3>
-              <p className="text-xs text-gray-400 mb-6">Veja quais cartas já foram reivindicadas pelos membros. Clique em uma carta escolhida para inspecionar o perfil.</p>
+              <p className="text-xs text-gray-400 mb-6">Cartas fixas dos membros conectados. Clique em uma carta escolhida para inspecionar o perfil.</p>
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-7 gap-3">
                 {TAROT_CARDS.map((card) => {
                   const owner = teamMembers.find(m => m.cardId === card.id);
@@ -531,24 +734,6 @@ export default function ArcanaWorkspace() {
                   <span className="text-[10px] text-gray-400 block uppercase font-mono">Função</span>
                   <p className="text-xs text-gray-200 mt-0.5">{viewingMember.member.role}</p>
                 </div>
-                <div>
-                  <span className="text-[10px] text-gray-400 block uppercase font-mono mb-1.5">Atividades Convocadas</span>
-                  <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                    {tasks.filter(t => t.assignedCards.includes(viewingMember.card.id)).length === 0 ? (
-                      <p className="text-[11px] text-gray-500 italic">Nenhuma atividade atribuída no momento.</p>
-                    ) : (
-                      tasks.filter(t => t.assignedCards.includes(viewingMember.card.id)).map(task => {
-                        const isDone = task.completions[viewingMember.card.id];
-                        return (
-                          <div key={task.id} className="bg-[#121624] border border-gray-800 p-2 rounded-lg flex items-center justify-between text-xs">
-                            <span className="truncate max-w-[200px] text-gray-300">{task.title}</span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${isDone ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{isDone ? 'Concluído' : 'Pendente'}</span>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
               </div>
               <button onClick={() => setViewingMember(null)} className="w-full mt-4 py-2.5 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white text-xs hover:scale-[1.01] transition shadow-md">Fechar Perfil</button>
             </div>
@@ -557,12 +742,12 @@ export default function ArcanaWorkspace() {
 
         {activeTab === 'tasks' && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <h3 className="text-lg font-bold text-white">Quadro de Missões & Atividades</h3>
                 <p className="text-xs text-gray-400">Atividades compartilhadas entre as cartas da equipe.</p>
               </div>
-              <button onClick={() => setIsTaskModalOpen(true)} className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 font-bold text-xs hover:scale-105 transition flex items-center gap-2 shadow-lg shadow-cyan-500/20">
+              <button onClick={() => setIsTaskModalOpen(true)} className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 font-bold text-xs hover:scale-105 transition flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20">
                 <Plus className="w-4 h-4" /> Criar Nova Atividade
               </button>
             </div>
@@ -577,10 +762,10 @@ export default function ArcanaWorkspace() {
                 return (
                   <div key={task.id} className={`bg-[#121624] border rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 transition ${status === 'completed' ? 'border-emerald-500/40 bg-emerald-950/10' : status === 'failed' ? 'border-red-500/40 bg-red-950/10' : 'border-gray-800 hover:border-gray-700'}`}>
                     <div className="space-y-2 flex-1">
-                      <div className="flex items-center gap-3">
+                      <div className="flex flex-wrap items-center gap-3">
                         <h4 className="text-base font-bold text-white">{task.title}</h4>
                         {status === 'completed' && <span className="text-[10px] bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 px-2.5 py-0.5 rounded-full font-bold uppercase flex items-center gap-1"><Check className="w-3 h-3" /> Concluída</span>}
-                        {status === 'failed' && <span className="text-[10px] bg-red-500/20 border border-red-500/40 text-red-400 px-2.5 py-0.5 rounded-full font-bold uppercase flex items-center gap-1"><AlertCircle className="w-3 h-3" /> Fracassada (Prazo)</span>}
+                        {status === 'failed' && <span className="text-[10px] bg-red-500/20 border border-red-500/40 text-red-400 px-2.5 py-0.5 rounded-full font-bold uppercase flex items-center gap-1"><AlertCircle className="w-3 h-3" /> Fracassada</span>}
                         {status === 'pending' && <span className="text-[10px] bg-cyan-500/20 border border-cyan-500/40 text-cyan-400 px-2.5 py-0.5 rounded-full font-bold uppercase flex items-center gap-1"><Clock className="w-3 h-3" /> Em Andamento</span>}
                       </div>
                       <p className="text-xs text-gray-400 leading-relaxed">{task.description}</p>
@@ -593,7 +778,7 @@ export default function ArcanaWorkspace() {
                         )}
                         <div className="flex items-center gap-1.5">
                           <span className="text-[11px] text-gray-500">Convocados:</span>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             {task.assignedCards.map(cId => {
                               const cardObj = TAROT_CARDS.find(c => c.id === cId);
                               const owner = teamMembers.find(m => m.cardId === cId);
@@ -612,7 +797,7 @@ export default function ArcanaWorkspace() {
 
                     <div className="flex items-center gap-3">
                       {isUserAssigned && status === 'pending' && (
-                        <button onClick={() => toggleUserTaskCompletion(task.id)} className={`px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 ${isUserDone ? 'bg-emerald-500/20 border border-emerald-500 text-emerald-400 hover:bg-emerald-500/30' : 'bg-cyan-500 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'}`}>
+                        <button onClick={() => toggleUserTaskCompletion(task.id)} className={`w-full md:w-auto px-4 py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 ${isUserDone ? 'bg-emerald-500/20 border border-emerald-500 text-emerald-400 hover:bg-emerald-500/30' : 'bg-cyan-500 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'}`}>
                           <Check className="w-4 h-4" /> {isUserDone ? 'Concluído por você' : 'Marcar Minha Parte'}
                         </button>
                       )}
@@ -632,11 +817,11 @@ export default function ArcanaWorkspace() {
               <div className="space-y-4">
                 <div>
                   <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Título da Atividade</label>
-                  <input type="text" placeholder="Ex: Refatoração do Banco de Dados..." value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
+                  <input type="text" placeholder="Ex: Refatoração..." value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Descrição</label>
-                  <textarea placeholder="Detalhamento das tarefas a serem entregues..." value={newTaskDesc} onChange={(e) => setNewTaskDesc(e.target.value)} rows={3} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
+                  <textarea placeholder="Detalhamento..." value={newTaskDesc} onChange={(e) => setNewTaskDesc(e.target.value)} rows={3} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Prazo Final (Deadline)</label>
@@ -670,13 +855,66 @@ export default function ArcanaWorkspace() {
         )}
 
         {activeTab === 'notes' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {notes.map((note) => (
-              <div key={note.id} className="bg-[#121624] border border-gray-800 rounded-2xl p-5 space-y-3">
-                <div className="flex justify-between items-start"><h4 className="font-bold text-white">{note.title}</h4><span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-2.5 py-1 rounded-md font-mono">{note.tag}</span></div>
-                <p className="text-xs text-gray-400 leading-relaxed">{note.content}</p>
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">Caderno de Anotações Coletivo</h3>
+                <p className="text-xs text-gray-400">Notas salvas em tempo real no banco de dados.</p>
               </div>
-            ))}
+              <button onClick={() => setIsNoteModalOpen(true)} className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 font-bold text-xs hover:scale-105 transition flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20">
+                <Plus className="w-4 h-4" /> Nova Anotação
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {notes.map((note) => (
+                <div key={note.id} className="bg-[#121624] border border-gray-800 rounded-2xl p-5 space-y-3 relative group">
+                  <div className="flex justify-between items-start">
+                    <h4 className="font-bold text-white text-sm">{note.title}</h4>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-2.5 py-1 rounded-md font-mono">{note.tag}</span>
+                      <button onClick={() => handleDeleteNote(note.id)} className="text-gray-600 hover:text-red-400 transition p-1" title="Excluir Nota">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-400 leading-relaxed">{note.content}</p>
+                  <div className="pt-2 border-t border-gray-800/60 flex justify-between items-center text-[10px] text-gray-500">
+                    <span>Autor: <strong className="text-cyan-400">{note.author || 'Equipe'}</strong></span>
+                    <span>{new Date(note.created_at).toLocaleDateString()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {isNoteModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+            <div className="bg-[#121624] border border-cyan-500/60 rounded-3xl p-6 max-w-md w-full shadow-[0_0_80px_rgba(6,182,212,0.5)] relative">
+              <button onClick={() => setIsNoteModalOpen(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white p-1 rounded-full bg-gray-800/60 transition"><X className="w-4 h-4" /></button>
+              <h3 className="text-lg font-bold text-white mb-4">Nova Anotação no Caderno</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Título da Nota</label>
+                  <input type="text" placeholder="Ex: Ideia..." value={newNoteTitle} onChange={(e) => setNewNoteTitle(e.target.value)} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Categoria / Tag</label>
+                  <select value={newNoteTag} onChange={(e) => setNewNoteTag(e.target.value)} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400">
+                    <option value="Geral">Geral</option>
+                    <option value="Design">Design</option>
+                    <option value="Equipe">Equipe</option>
+                    <option value="Técnico">Técnico</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-gray-400 mb-1">Conteúdo</label>
+                  <textarea placeholder="Detalhes..." value={newNoteContent} onChange={(e) => setNewNoteContent(e.target.value)} rows={4} className="w-full bg-[#1a1f33] border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
+                </div>
+                <button onClick={handleCreateNote} className="w-full mt-2 py-3 rounded-xl font-bold bg-gradient-to-r from-cyan-500 to-purple-600 text-white shadow-lg shadow-cyan-500/25 hover:scale-[1.01] transition text-xs">Salvar Anotação</button>
+              </div>
+            </div>
           </div>
         )}
       </main>
